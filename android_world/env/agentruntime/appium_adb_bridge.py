@@ -75,6 +75,14 @@ _SMS_DB_PATH = (
     '/data/user_de/0/com.android.providers.telephony/databases/mmssms.db'
 )
 
+# Device-side `emu sms send` replacement baked into SmartRun redroid images.
+_SMS_INJECT_TOOL = '/system/bin/smartrun-sms-inject'
+
+
+def _b64(text: str) -> str:
+  return base64.b64encode(text.encode('utf-8')).decode('ascii')
+
+
 if TYPE_CHECKING:
   from android_world.env.agentruntime.appium_env import AppiumEnv
 
@@ -207,7 +215,8 @@ class AppiumAdbBridge:
     """Inject an incoming SMS by writing directly to the telephony database.
 
     This is a fallback for environments where ``emu sms send`` is unavailable
-    (e.g. sandbox/redroid without emulator console access).  The approach:
+    (e.g. sandbox/redroid without emulator console access).  If the image
+    ships ``/system/bin/smartrun-sms-inject`` it is used.  Otherwise:
 
       1. Query ``content://mms-sms/threadID?recipient=<phone>`` to obtain or
          create a conversation thread.
@@ -222,11 +231,28 @@ class AppiumAdbBridge:
       An ``AdbResponse`` with OK status on success.
     """
     logging.info(
-        'Injecting SMS via sqlite (emu sms send fallback): '
+        'Injecting SMS (emu sms send replacement): '
         'from=%s body=%r', phone, message[:60]
     )
     shell = self._appium_env.shell
 
+    # Preferred path: the device-side tool shipped in SmartRun redroid images
+    # (>= v33.3).  It handles thread creation and the FTS/trusted_schema quirks
+    # itself.  Arguments go base64-encoded so no quoting survives to the
+    # device shell, whatever the message contains.
+    if 'yes' in shell(f'test -x {_SMS_INJECT_TOOL} && echo yes'):
+      output = shell(
+          f'{_SMS_INJECT_TOOL} --b64 {_b64(phone)} {_b64(message)}; '
+          'echo rc=$?'
+      )
+      if 'rc=0' not in output:
+        return _error_response(f'smartrun-sms-inject failed: {output!r}')
+      logging.info('SMS injected via %s: from=%s', _SMS_INJECT_TOOL, phone)
+      return _ok_response(
+          generic=adb_pb2.AdbResponse.GenericResponse(output=b'OK')
+      )
+
+    # Fallback for images without the tool.
     # Step 1: Get or create a thread for this phone number.
     thread_query = (
         f'content query --uri '

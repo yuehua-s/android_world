@@ -193,5 +193,44 @@ class AppiumAdbBridgeErrorRecoveryTest(absltest.TestCase):
     self.assertIn('driver died', resp.error_message)
 
 
+def _emu_sms_request(phone, *words):
+  return adb_pb2.AdbRequest(
+      generic=adb_pb2.AdbRequest.GenericRequest(
+          args=['emu', 'sms', 'send', phone, *words]
+      )
+  )
+
+
+class AppiumAdbBridgeSmsTest(absltest.TestCase):
+
+  def test_emu_sms_send_uses_device_tool_with_base64_args(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'rc=0\n']
+    resp = bridge.execute_adb_call(
+        _emu_sms_request('+1555', "it's", 'a "test"')
+    )
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+    cmd = env.shell.call_args_list[1][0][0]
+    self.assertEqual(
+        cmd,
+        '/system/bin/smartrun-sms-inject --b64 KzE1NTU= '
+        'aXQncyBhICJ0ZXN0Ig==; echo rc=$?',
+    )
+
+  def test_emu_sms_send_reports_tool_failure(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'mmssms.db missing\nrc=1\n']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.INTERNAL_ERROR)
+    self.assertIn('mmssms.db missing', resp.error_message)
+
+  def test_emu_sms_send_falls_back_to_sqlite_without_tool(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['', 'Row: 0 _id=7\n', '']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+    self.assertIn('INSERT INTO sms', env.shell.call_args_list[2][0][0])
+
+
 if __name__ == '__main__':
   absltest.main()

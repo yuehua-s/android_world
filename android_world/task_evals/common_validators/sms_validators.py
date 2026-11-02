@@ -227,7 +227,12 @@ def clear_sms_and_threads(env: env_interface.AndroidEnvInterface) -> None:
   device_mode = getattr(env, 'device_mode', '')
 
   if device_mode == 'agentruntime':
-    # AgentRuntime (Appium bridge): no root/sqlite, use content provider URIs.
+    # AgentRuntime (Appium bridge): use content provider URIs. The Appium
+    # shell is uid 0 on redroid, whose provider writes are silently ignored
+    # unless WRITE_SMS is granted first (same as the redroid branch below).
+    adb_utils.issue_generic_request(
+        ['shell', 'appops set --uid 0 WRITE_SMS allow'], env
+    )
     for uri in ('content://sms', 'content://mms-sms/conversations'):
       adb_utils.issue_generic_request(
           ['shell', 'content', 'delete', '--uri', uri], env
