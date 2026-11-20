@@ -193,5 +193,100 @@ class AppiumAdbBridgeErrorRecoveryTest(absltest.TestCase):
     self.assertIn('driver died', resp.error_message)
 
 
+def _emu_sms_request(phone, *words):
+  return adb_pb2.AdbRequest(
+      generic=adb_pb2.AdbRequest.GenericRequest(
+          args=['emu', 'sms', 'send', phone, *words]
+      )
+  )
+
+
+class AppiumAdbBridgeSmsTest(absltest.TestCase):
+
+  _PROBE = (
+      '[ -x /system/bin/smartrun-sms-inject ] && echo yes; true'
+  )
+
+  def test_emu_sms_send_uses_device_tool_with_base64_args(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'rc=0\n']
+    resp = bridge.execute_adb_call(
+        _emu_sms_request('+1555', "it's", 'a "test"')
+    )
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+    self.assertEqual(env.shell.call_args_list[0][0][0], self._PROBE)
+    cmd = env.shell.call_args_list[1][0][0]
+    self.assertEqual(
+        cmd,
+        '/system/bin/smartrun-sms-inject --b64 KzE1NTU= '
+        'aXQncyBhICJ0ZXN0Ig==; echo rc=$?',
+    )
+
+  def test_emu_sms_send_reports_tool_failure(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'mmssms.db missing\nrc=1\n']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.INTERNAL_ERROR)
+    self.assertIn('mmssms.db missing', resp.error_message)
+
+  def test_emu_sms_send_rc_must_be_exactly_zero(self):
+    # Success is decided by a line that is exactly 'rc=0', not by the
+    # substring appearing anywhere in the tool's output.
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'note: rc=0 expected\nrc=2\n']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.INTERNAL_ERROR)
+
+  def test_emu_sms_send_accepts_crlf_output(self):
+    # adb over a pty can return CRLF line endings.
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\r\n', 'rc=0\r\n']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+
+  def test_emu_sms_send_falls_back_to_sqlite_without_tool(self):
+    # Real `mobile: shell` returns '' (exit 0) for the probe when the tool is
+    # absent, because the probe ends in `true`.
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['', 'Row: 0 _id=7\n', '']
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+    self.assertEqual(env.shell.call_args_list[0][0][0], self._PROBE)
+    self.assertIn('INSERT INTO sms', env.shell.call_args_list[2][0][0])
+
+  def test_tool_probe_is_cached_per_bridge(self):
+    bridge, env = _make_bridge()
+    env.shell.side_effect = ['yes\n', 'rc=0\n', 'rc=0\n', 'rc=0\n']
+    for i in range(3):
+      resp = bridge.execute_adb_call(_emu_sms_request('+1555', f'msg{i}'))
+      self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.OK)
+    probes = [
+        c for c in env.shell.call_args_list if c[0][0] == self._PROBE
+    ]
+    self.assertLen(probes, 1)
+    self.assertEqual(env.shell.call_count, 4)
+
+  def test_probe_error_surfaces_as_internal_error(self):
+    # If the probe itself fails (e.g. Appium session dropped), the request
+    # fails loudly instead of silently taking the sqlite fallback.
+    bridge, env = _make_bridge()
+    env.shell.side_effect = RuntimeError('mobile: shell failed')
+    resp = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(resp.status, adb_pb2.AdbResponse.Status.INTERNAL_ERROR)
+    self.assertIn('mobile: shell failed', resp.error_message)
+
+  def test_failed_probe_is_not_cached(self):
+    # A transient probe error must not pin the bridge to the fallback path.
+    bridge, env = _make_bridge()
+    env.shell.side_effect = [RuntimeError('session lost'), 'yes\n', 'rc=0\n']
+    first = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    second = bridge.execute_adb_call(_emu_sms_request('+1555', 'hi'))
+    self.assertEqual(first.status, adb_pb2.AdbResponse.Status.INTERNAL_ERROR)
+    self.assertEqual(second.status, adb_pb2.AdbResponse.Status.OK)
+    self.assertIn(
+        'smartrun-sms-inject --b64', env.shell.call_args_list[2][0][0]
+    )
+
+
 if __name__ == '__main__':
   absltest.main()

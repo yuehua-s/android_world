@@ -145,6 +145,7 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
 
     mock_ok = adb_pb2.AdbResponse()  # empty OK for content delete calls
     self.mock_issue_generic_request.side_effect = [
+        mock_ok,            # appops set --uid 0 WRITE_SMS allow
         mock_ok,            # content delete content://sms
         mock_ok,            # content delete content://mms-sms/conversations
         mock_response_time,
@@ -155,6 +156,7 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
     test_utils.log_mock_calls(self.mock_issue_generic_request)
 
     env = mock.MagicMock()
+    env.controller.device_mode = 'agentruntime'
     params = {'number': '1234567890', 'message': 'Hello World'}
 
     task = sms_validators.SimpleSMSSendSms(params)
@@ -162,6 +164,10 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
 
     # clear_sms_and_threads now uses issue_generic_request with content URIs.
     self.assertEqual(self.mock_execute_sql_command.call_count, 0)
+    self.assertEqual(
+        self.mock_issue_generic_request.call_args_list[0].args[0],
+        ['shell', 'appops set --uid 0 WRITE_SMS allow'],
+    )
 
   def test_initialize_task_message_already_sent(self):
     # From shell date +%s
@@ -193,6 +199,7 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
 
     mock_ok = adb_pb2.AdbResponse()  # empty OK for content delete calls
     self.mock_issue_generic_request.side_effect = [
+        mock_ok,            # appops set --uid 0 WRITE_SMS allow
         mock_ok,            # content delete content://sms
         mock_ok,            # content delete content://mms-sms/conversations
         mock_response_time,
@@ -201,6 +208,7 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
     ]
 
     env = mock.MagicMock()
+    env.controller.device_mode = 'agentruntime'
 
     params = {'number': '1234567890', 'message': 'Hello World'}
 
@@ -209,6 +217,43 @@ class TestMessagesSendTextMessage(test_utils.AdbEvalTestBase):
       task.initialize_task(env)
     # clear_sms_and_threads now uses issue_generic_request with content URIs.
     self.assertEqual(self.mock_execute_sql_command.call_count, 0)
+
+
+class TestClearSmsAndThreadsAgentRuntime(test_utils.AdbEvalTestBase):
+
+  def test_grants_write_sms_then_deletes(self):
+    self.mock_issue_generic_request.return_value = adb_pb2.AdbResponse()
+    env = mock.MagicMock(device_mode='agentruntime')
+
+    sms_validators.clear_sms_and_threads(env)
+
+    self.assertEqual(
+        [c.args[0] for c in self.mock_issue_generic_request.call_args_list],
+        [
+            ['shell', 'appops set --uid 0 WRITE_SMS allow'],
+            ['shell', 'content', 'delete', '--uri', 'content://sms'],
+            ['shell', 'content', 'delete', '--uri',
+             'content://mms-sms/conversations'],
+        ],
+    )
+    self.assertEqual(self.mock_execute_sql_command.call_count, 0)
+
+  def test_failed_appops_does_not_block_delete(self):
+    # issue_generic_request reports failures via status, it does not raise;
+    # the delete calls must still go out so stale threads are cleared.
+    failed = adb_pb2.AdbResponse(
+        status=adb_pb2.AdbResponse.Status.INTERNAL_ERROR
+    )
+    self.mock_issue_generic_request.side_effect = [
+        failed,
+        adb_pb2.AdbResponse(),
+        adb_pb2.AdbResponse(),
+    ]
+    env = mock.MagicMock(device_mode='agentruntime')
+
+    sms_validators.clear_sms_and_threads(env)
+
+    self.assertEqual(self.mock_issue_generic_request.call_count, 3)
 
 
 if __name__ == '__main__':
